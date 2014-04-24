@@ -69,6 +69,27 @@ public:
         float g;            // gravity magnitude
     };
     
+    struct Grid {
+        typedef vector<int> cell_t;
+        Grid(){}
+        Grid(int w, int h):w(w),h(h) { init(); }
+        void init() {
+            cells.resize(w * h);
+        }
+        void reset() {
+            cells.clear();
+            init();
+        }
+        cell_t& getcell(int x, int y) {
+            int idx = y*w+x;
+            if(idx >=0 && idx < w*h) return cells[idx];
+            else throw "Try to access ghost cell.";
+        }
+        
+        vector<cell_t> cells;
+        int w, h;
+    };
+    
 public:
     typedef glm::vec2 Vec;
     
@@ -81,6 +102,8 @@ protected:
     void resize(int n);
     void initParticles();
     void normalizeMass();
+    
+    void sortParticles();
     
     void computeDensity();
     void computeAcceleration();
@@ -106,6 +129,8 @@ private:
     
     float mass;
     unsigned int n;
+    
+    Grid pgrid;
 };
 
 #endif /* defined(__SPHSim_C____SPHSystem__) */

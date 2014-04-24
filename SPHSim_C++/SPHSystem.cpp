@@ -7,6 +7,7 @@
 //
 
 #include "SPHSystem.h"
+#define USE_BUCKETS 1
 
 SPHSystem::SPHSystem() {
     initParticles();
@@ -39,7 +40,7 @@ void SPHSystem::run() {
     ofstream f(params.logfile, ios::binary);
     
     writeHeader(f);
-    writeFrame(f);
+    writeFrame(f, &pressure[0]);
     
     computeAcceleration();
     leapFrogStart();
@@ -51,7 +52,7 @@ void SPHSystem::run() {
             leapFrog();
             checkState();
         }
-        writeFrame(f);
+        writeFrame(f, &pressure[0]);
     }
 }
 
@@ -90,6 +91,10 @@ void SPHSystem::initParticles() {
             }
         }
     }
+    int gw = ceil(0.99/h);
+    int gh = ceil(0.99/h);
+    
+    pgrid = Grid(gw, gh);
     
     normalizeMass();
 }
@@ -110,7 +115,22 @@ void SPHSystem::normalizeMass() {
     mass *= ( rho0*rhos / rho2s );
 }
 
+void SPHSystem::sortParticles() {
+    pgrid.reset();
+    
+    for( int i=0;i<p.size();i++ ) {
+        int gx = min(max((int)floor(p[i].x * pgrid.w), 0), pgrid.w-1);
+        int gy = min(max((int)floor(p[i].y * pgrid.h), 0), pgrid.h-1);
+        Grid::cell_t& cell = pgrid.getcell(gx, gy);
+        cell.push_back(i);
+    }
+}
+
 void SPHSystem::computeDensity() {
+#if USE_BUCKETS
+    sortParticles();
+#endif
+
     vector<float>& rho = density;
     
     float h  = params.h;
@@ -120,9 +140,45 @@ void SPHSystem::computeDensity() {
     
     memset(&(rho[0]), 0, sizeof(float)*rho.size());
     
+    const int neighbors[][2] = {
+        {-1, -1}, {-1, 0}, {-1, 1},
+        { 0, -1}, { 0, 0}, { 0, 1},
+        { 1, -1}, { 1, 0}, { 1, 1}
+    };
+
+#if USE_BUCKETS
     for (int i = 0; i < n; ++i) {
         rho[i] += 4 * mass / M_PI / h2;
-        for (int j = i+1; j < n; ++j) {
+        int gx = max(floor(p[i].x * pgrid.w), 0.0f);
+        int gy = max(floor(p[i].y * pgrid.h), 0.0f);
+        
+        const Grid::cell_t& cell = pgrid.getcell(gx, gy);
+        for(int nidx=0;nidx<9;nidx++) {
+            int nx = gx + neighbors[nidx][0];
+            int ny = gy + neighbors[nidx][1];
+            if( nx >= 0 && nx < pgrid.w && ny >= 0 && ny < pgrid.h ) {
+                const Grid::cell_t& ncell = pgrid.getcell(nx, ny);
+                
+                for (int j : ncell) {
+                    if (i >= j) {
+                        continue;
+                    }
+                    Vec dp = p[i] - p[j];
+                    float r2 = glm::dot(dp, dp);
+                    float z  = h2-r2;
+                    if (z > 0) {
+                        float rho_ij = C*z*z*z;
+                        rho[i] += rho_ij;
+                        rho[j] += rho_ij;
+                    }
+                }
+            }
+        }
+    }
+#else
+    for (int i = 0; i < n; ++i) {
+        rho[i] += 4 * mass / M_PI / h2;
+        for (int j = i+1; j<n; ++j) {
             Vec dp = p[i] - p[j];
             float r2 = glm::dot(dp, dp);
             float z  = h2-r2;
@@ -132,6 +188,12 @@ void SPHSystem::computeDensity() {
                 rho[j] += rho_ij;
             }
         }
+    }
+#endif
+    
+    // update pressure
+    for (int i=0; i<n; ++i) {
+        pressure[i] = params.k * (rho[i] - params.rho0);
     }
 }
 
@@ -150,12 +212,6 @@ void SPHSystem::computeAcceleration() {
     // Compute density and color
     computeDensity();
     
-//    for ( auto x : rho ) {
-//        cout << x << endl;
-//    }
-//    int dummy;
-//    cin >> dummy;
-    
     // Start with gravity and surface forces
     for (int i = 0; i < n; ++i) {
         a[i] = Vec(0, -g);
@@ -166,6 +222,48 @@ void SPHSystem::computeAcceleration() {
     float Cp =  15*k;
     float Cv = -40*mu;
     
+#if USE_BUCKETS
+    const int neighbors[][2] = {
+        {-1, -1}, {-1, 0}, {-1, 1},
+        { 0, -1}, { 0, 0}, { 0, 1},
+        { 1, -1}, { 1, 0}, { 1, 1}
+    };
+    
+    // Now compute interaction forces
+    for (int i = 0; i < n; ++i) {
+        const float rhoi = rho[i];
+        int gx = max(floor(p[i].x * pgrid.w), 0.0f);
+        int gy = max(floor(p[i].y * pgrid.h), 0.0f);
+        
+        const Grid::cell_t& cell = pgrid.getcell(gx, gy);
+        for(int nidx=0;nidx<9;nidx++) {
+            int nx = gx + neighbors[nidx][0];
+            int ny = gy + neighbors[nidx][1];
+            if( nx >= 0 && nx < pgrid.w && ny >= 0 && ny < pgrid.h ) {
+                const Grid::cell_t& ncell = pgrid.getcell(nx, ny);
+
+                for (int j : ncell) {
+                    if( i >= j ) continue;
+                    Vec dp = p[i] - p[j];
+                    float r2 = glm::dot(dp, dp);
+                    if (r2 < h2) {
+                        const float rhoj = rho[j];
+                        float q = sqrt(r2)/h;
+                        float u = 1-q;
+                        float w0 = C0 * u/rhoi/rhoj;
+                        float wp = w0 * Cp * (rhoi+rhoj-2*rho0) * u/q;
+                        float wv = w0 * Cv;
+                        Vec dv = v[i] - v[j];
+                        a[i].x += (wp*dp.x + wv*dv.x);
+                        a[i].y += (wp*dp.y + wv*dv.y);
+                        a[j].x -= (wp*dp.x + wv*dv.x);
+                        a[j].y -= (wp*dp.y + wv*dv.y);
+                    }
+                }
+            }
+        }
+    }
+#else
     // Now compute interaction forces
     for (int i = 0; i < n; ++i) {
         const float rhoi = rho[i];
@@ -187,6 +285,7 @@ void SPHSystem::computeAcceleration() {
             }
         }
     }
+#endif
 }
 
 void SPHSystem::dampReflect(int side, float barrier, Vec& pos, Vec& velo, Vec& veloh) {
@@ -234,15 +333,20 @@ void SPHSystem::leapFrogStart() {
     const float dt = params.dt;
     for (int i = 0; i < n; ++i) vh[i]  = v[i] + a[i] * dt / 2.0f;
     for (int i = 0; i < n; ++i) v[i]  += a[i]  * dt;
-    for (int i = 0; i < n; ++i) p[i]  += vh[i] * dt;
+    for (int i = 0; i < n; ++i) {
+        p[i]  += vh[i] * dt;
+    }
     reflectOnBoundary();
 }
 
 void SPHSystem::leapFrog() {
     const float dt = params.dt;
+    
     for (int i = 0; i < n; ++i) vh[i] += a[i]  * dt;
     for (int i = 0; i < n; ++i) v[i]   = vh[i] + a[i] * dt / 2.0f;
-    for (int i = 0; i < n; ++i) p[i]  += vh[i] * dt;
+    for (int i = 0; i < n; ++i) {
+        p[i]  += vh[i] * dt;
+    }
     reflectOnBoundary();
 }
 
