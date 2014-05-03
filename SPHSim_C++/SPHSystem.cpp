@@ -30,8 +30,11 @@ void SPHSystem::writeFrame(ofstream& f, float* c = 0) {
     for (int i = 0; i < n; ++i) {
         Vec x = p[i];
         float ci = c ? c[i] : 0;
+        //cout << p[i].x << ' ' << p[i].y << ' '<< p[i].z << ' ' << ci << endl;
+        
         f.write(reinterpret_cast<const char*>(&x.x), sizeof(float));
         f.write(reinterpret_cast<const char*>(&x.y), sizeof(float));
+        f.write(reinterpret_cast<const char*>(&x.z), sizeof(float));
         f.write(reinterpret_cast<const char*>(&ci), sizeof(float));
     }
 }
@@ -70,13 +73,14 @@ void SPHSystem::initParticles() {
     float h  = params.h;
     float hh = h/1.3;
     
-    auto indicatef = [](float x, float y){ return x<0.5 && y<0.5; };
+    auto indicatef = [](float x, float y, float z){ return x>0.5 && y<0.5 && z>0.5;};
     
     // Count mesh points that fall in indicated region.
     int count = 0;
     for (float x = 0; x < 1; x += hh)
         for (float y = 0; y < 1; y += hh)
-            count += indicatef(x,y);
+            for (float z = 0; z < 1; z += hh)
+                count += indicatef(x, y, z);
     
     // Populate the particle data structure
     resize(count);
@@ -84,17 +88,22 @@ void SPHSystem::initParticles() {
     int i = 0;
     for (float x = 0; x < 1; x += hh) {
         for (float y = 0; y < 1; y += hh) {
-            if (indicatef(x,y)) {
-                p[i] = Vec(x, y);
-                v[i] = Vec(0, 0);
-                ++i;
+            for (float z = 0; z < 1; z += hh) {
+                if (indicatef(x, y, z)) {
+                    p[i] = Vec(x, y, z);
+                    //cout << p[i].x << ' ' << p[i].y << ' '<< p[i].z << endl;
+                    v[i] = Vec(0, 0, 0);
+                    ++i;
+                }
             }
         }
     }
+
     int gw = ceil(0.99/h);
     int gh = ceil(0.99/h);
+    int gd = ceil(0.99/h);
     
-    pgrid = Grid(gw, gh);
+    pgrid = Grid(gw, gh, gd);
     
     normalizeMass();
 }
@@ -122,7 +131,8 @@ void SPHSystem::sortParticles() {
     for( int i=0;i<p.size();i++ ) {
         int gx = min(max((int)floor(p[i].x * pgrid.w), 0), pgrid.w-1);
         int gy = min(max((int)floor(p[i].y * pgrid.h), 0), pgrid.h-1);
-        Grid::cell_t& cell = pgrid.getcell(gx, gy);
+        int gz = min(max((int)floor(p[i].z * pgrid.d), 0), pgrid.d-1);
+        Grid::cell_t& cell = pgrid.getcell(gx, gy, gz);
         cell.push_back(i);
     }
 }
@@ -133,27 +143,41 @@ void SPHSystem::computeDensity() {
     vector<float>& rho = density;
     
     float h  = params.h;
-    float h2 = h*h;
+    float h3 = h*h*h;
     
     memset(&(rho[0]), 0, sizeof(float)*rho.size());
     
-    const int neighbors[][2] = {
-        {-1, -1}, {-1, 0}, {-1, 1},
-        { 0, -1}, { 0, 0}, { 0, 1},
-        { 1, -1}, { 1, 0}, { 1, 1}
+    const int neighbors[][3] = {
+        {-1, -1, -1}, {-1, 0, -1}, {-1, 1, -1},
+        { 0, -1, -1}, { 0, 0, -1}, { 0, 1, -1},
+        { 1, -1, -1}, { 1, 0, -1}, { 1, 1, -1},
+
+        {-1, -1, 0}, {-1, 0, 0}, {-1, 1, 0},
+        { 0, -1, 0}, { 0, 0, 0}, { 0, 1, 0},
+        { 1, -1, 0}, { 1, 0, 0}, { 1, 1, 0},
+
+        {-1, -1, 1}, {-1, 0, 1}, {-1, 1, 1},
+        { 0, -1, 1}, { 0, 0, 1}, { 0, 1, 1},
+        { 1, -1, 1}, { 1, 0, 1}, { 1, 1, 1},
     };
     
     for (int i = 0; i < n; ++i) {
-        rho[i] += 4 * mass / M_PI / h2;             // add the particle itself
+        rho[i] += mass * poly6(h, 0);
+        
         int gx = max(floor(p[i].x * pgrid.w), 0.0f);
         int gy = max(floor(p[i].y * pgrid.h), 0.0f);
+        int gz = max(floor(p[i].z * pgrid.d), 0.0f);
         
         //const Grid::cell_t& cell = pgrid.getcell(gx, gy);
-        for(int nidx=0;nidx<9;nidx++) {
+        for(int nidx=0;nidx<27;nidx++) {
             int nx = gx + neighbors[nidx][0];
             int ny = gy + neighbors[nidx][1];
-            if( nx >= 0 && nx < pgrid.w && ny >= 0 && ny < pgrid.h ) {
-                const Grid::cell_t& ncell = pgrid.getcell(nx, ny);
+            int nz = gz + neighbors[nidx][2];
+            
+            if( nx >= 0 && nx < pgrid.w
+             && ny >= 0 && ny < pgrid.h
+             && nz >= 0 && nz < pgrid.d ) {
+                const Grid::cell_t& ncell = pgrid.getcell(nx, ny, nz);
                 
                 for (int j : ncell) {
                     if (i >= j) {
@@ -196,13 +220,21 @@ void SPHSystem::computeAcceleration() {
     
     // Start with gravity and surface forces
     for (int i = 0; i < n; ++i) {
-        a[i] = Vec(0, -g);
+        a[i] = Vec(0, -g, 0);
     }
     
-    const int neighbors[][2] = {
-        {-1, -1}, {-1, 0}, {-1, 1},
-        { 0, -1}, { 0, 0}, { 0, 1},
-        { 1, -1}, { 1, 0}, { 1, 1}
+    const int neighbors[][3] = {
+        {-1, -1, -1}, {-1, 0, -1}, {-1, 1, -1},
+        { 0, -1, -1}, { 0, 0, -1}, { 0, 1, -1},
+        { 1, -1, -1}, { 1, 0, -1}, { 1, 1, -1},
+        
+        {-1, -1, 0}, {-1, 0, 0}, {-1, 1, 0},
+        { 0, -1, 0}, { 0, 0, 0}, { 0, 1, 0},
+        { 1, -1, 0}, { 1, 0, 0}, { 1, 1, 0},
+        
+        {-1, -1, 1}, {-1, 0, 1}, {-1, 1, 1},
+        { 0, -1, 1}, { 0, 0, 1}, { 0, 1, 1},
+        { 1, -1, 1}, { 1, 0, 1}, { 1, 1, 1},
     };
     
     // Now compute interaction forces
@@ -210,13 +242,18 @@ void SPHSystem::computeAcceleration() {
         const float rhoi = rho[i];
         int gx = max(floor(p[i].x * pgrid.w), 0.0f);
         int gy = max(floor(p[i].y * pgrid.h), 0.0f);
+        int gz = max(floor(p[i].z * pgrid.d), 0.0f);
         
         //const Grid::cell_t& cell = pgrid.getcell(gx, gy);
-        for(int nidx=0;nidx<9;nidx++) {
+        for(int nidx=0;nidx<27;nidx++) {
             int nx = gx + neighbors[nidx][0];
             int ny = gy + neighbors[nidx][1];
-            if( nx >= 0 && nx < pgrid.w && ny >= 0 && ny < pgrid.h ) {
-                const Grid::cell_t& ncell = pgrid.getcell(nx, ny);
+            int nz = gz + neighbors[nidx][2];
+            
+            if( nx >= 0 && nx < pgrid.w
+             && ny >= 0 && ny < pgrid.h
+             && nz >= 0 && nz < pgrid.d ) {
+                const Grid::cell_t& ncell = pgrid.getcell(nx, ny, nz);
                 
                 for (int j : ncell) {
                     if( i >= j ) continue;
@@ -227,7 +264,7 @@ void SPHSystem::computeAcceleration() {
                     Vec fp = mass / rhoj / rhoi * 0.5f * (pressure[i] + pressure[j]) * spiky_grad(h, r) * dp;
                     
                     Vec dv = v[j] - v[i];
-                    
+
                     Vec fv = mu * mass / rhoj / rhoi * dv * viscosity_lap(h, r);
                     
                     Vec ftotal = fp + fv;
@@ -267,7 +304,9 @@ void SPHSystem::reflectOnBoundary() {
     const float XMAX = 1.0;
     const float YMIN = 0.0;
     const float YMAX = 1.0;
-    
+    const float ZMIN = 0.0;
+    const float ZMAX = 1.0;
+
     for (int i = 0; i < n; ++i) {
         Vec& pos = p[i];
         Vec& velo = v[i];
@@ -276,6 +315,8 @@ void SPHSystem::reflectOnBoundary() {
         if (pos.x > XMAX) dampReflect(0, XMAX, pos, velo, veloh);
         if (pos.y < YMIN) dampReflect(1, YMIN, pos, velo, veloh);
         if (pos.y > YMAX) dampReflect(1, YMAX, pos, velo, veloh);
+        if (pos.z < ZMIN) dampReflect(2, ZMIN, pos, velo, veloh);
+        if (pos.z > ZMAX) dampReflect(2, ZMAX, pos, velo, veloh);
     }
 }
 

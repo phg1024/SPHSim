@@ -72,26 +72,26 @@ public:
     struct Grid {
         typedef vector<int> cell_t;
         Grid(){}
-        Grid(int w, int h):w(w),h(h) { init(); }
+        Grid(int w, int h, int d):w(w),h(h),d(d) { init(); }
         void init() {
-            cells.resize(w * h);
+            cells.resize(w * h * d);
         }
         void reset() {
             cells.clear();
             init();
         }
-        cell_t& getcell(int x, int y) {
-            int idx = y*w+x;
-            if(idx >=0 && idx < w*h) return cells[idx];
+        cell_t& getcell(int x, int y, int z) {
+            int idx = w*h*z + y*w + x;
+            if(idx >=0 && idx < w*h*d) return cells[idx];
             else throw "Try to access ghost cell.";
         }
         
         vector<cell_t> cells;
-        int w, h;
+        int w, h, d;
     };
     
 public:
-    typedef glm::vec2 Vec;
+    typedef glm::vec3 Vec;
     
     SPHSystem();
     SPHSystem(const string& filename);
