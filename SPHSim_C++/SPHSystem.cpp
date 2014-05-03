@@ -7,7 +7,7 @@
 //
 
 #include "SPHSystem.h"
-#define USE_BUCKETS 1
+#include "kernels.h"
 
 SPHSystem::SPHSystem() {
     initParticles();
@@ -20,7 +20,7 @@ SPHSystem::SPHSystem(const string& filename) {
 
 void SPHSystem::writeHeader(ofstream& f) {
     float scale = 1.0;
-
+    
     f.write(reinterpret_cast<const char*>(&n), sizeof(int));
     f.write(reinterpret_cast<const char*>(&params.nframes), sizeof(int));
     f.write(reinterpret_cast<const char*>(&scale), sizeof(float));
@@ -101,7 +101,7 @@ void SPHSystem::initParticles() {
 
 void SPHSystem::normalizeMass() {
     mass = 1.0;
-
+    
     computeDensity();
     
     float rho0 = params.rho0;
@@ -111,7 +111,8 @@ void SPHSystem::normalizeMass() {
         rho2s += density[i]*density[i];
         rhos  += density[i];
     }
-
+    
+    // mass = rho0 * sum( rho[i] ) / sum( rho[i] * rho[i] )
     mass *= ( rho0*rhos / rho2s );
 }
 
@@ -130,13 +131,11 @@ void SPHSystem::computeDensity() {
 #if USE_BUCKETS
     sortParticles();
 #endif
-
+    
     vector<float>& rho = density;
     
     float h  = params.h;
     float h2 = h*h;
-    float h8 = ( h2*h2 )*( h2*h2 );
-    float C  = 4 * mass / M_PI / h8;
     
     memset(&(rho[0]), 0, sizeof(float)*rho.size());
     
@@ -145,14 +144,13 @@ void SPHSystem::computeDensity() {
         { 0, -1}, { 0, 0}, { 0, 1},
         { 1, -1}, { 1, 0}, { 1, 1}
     };
-
-#if USE_BUCKETS
+    
     for (int i = 0; i < n; ++i) {
-        rho[i] += 4 * mass / M_PI / h2;
+        rho[i] += 4 * mass / M_PI / h2;             // add the particle itself
         int gx = max(floor(p[i].x * pgrid.w), 0.0f);
         int gy = max(floor(p[i].y * pgrid.h), 0.0f);
         
-        const Grid::cell_t& cell = pgrid.getcell(gx, gy);
+        //const Grid::cell_t& cell = pgrid.getcell(gx, gy);
         for(int nidx=0;nidx<9;nidx++) {
             int nx = gx + neighbors[nidx][0];
             int ny = gy + neighbors[nidx][1];
@@ -164,47 +162,33 @@ void SPHSystem::computeDensity() {
                         continue;
                     }
                     Vec dp = p[i] - p[j];
-                    float r2 = glm::dot(dp, dp);
-                    float z  = h2-r2;
-                    if (z > 0) {
-                        float rho_ij = C*z*z*z;
-                        rho[i] += rho_ij;
-                        rho[j] += rho_ij;
-                    }
+                    
+                    float r = glm::length(dp);
+                    float rho_ij = mass * poly6(h, r);
+                    rho[i] += rho_ij;
+                    rho[j] += rho_ij;
                 }
             }
         }
     }
-#else
-    for (int i = 0; i < n; ++i) {
-        rho[i] += 4 * mass / M_PI / h2;
-        for (int j = i+1; j<n; ++j) {
-            Vec dp = p[i] - p[j];
-            float r2 = glm::dot(dp, dp);
-            float z  = h2-r2;
-            if (z > 0) {
-                float rho_ij = C*z*z*z;
-                rho[i] += rho_ij;
-                rho[j] += rho_ij;
-            }
-        }
-    }
-#endif
     
     // update pressure
+    const float B = params.k;
+    const float gamma = 7.0;
+    const float invRHO0 = 1.0 / params.rho0;
     for (int i=0; i<n; ++i) {
-        pressure[i] = params.k * (rho[i] - params.rho0);
+        //pressure[i] = params.k * (rho[i] - params.rho0);
+        pressure[i] = B * (powf(rho[i] * invRHO0, gamma) - 1);
     }
 }
 
 void SPHSystem::computeAcceleration() {
     // Unpack basic parameters
     const float h    = params.h;
-    const float rho0 = params.rho0;
-    const float k    = params.k;
+    //const float rho0 = params.rho0;
+    //const float k    = params.k;
     const float mu   = params.mu;
     const float g    = params.g;
-    const float h2   = h*h;
     
     // Unpack system state
     const vector<float>& rho = density;
@@ -217,12 +201,6 @@ void SPHSystem::computeAcceleration() {
         a[i] = Vec(0, -g);
     }
     
-    // Constants for interaction term
-    float C0 = mass / M_PI / ( (h2)*(h2) );
-    float Cp =  15*k;
-    float Cv = -40*mu;
-    
-#if USE_BUCKETS
     const int neighbors[][2] = {
         {-1, -1}, {-1, 0}, {-1, 1},
         { 0, -1}, { 0, 0}, { 0, 1},
@@ -235,57 +213,32 @@ void SPHSystem::computeAcceleration() {
         int gx = max(floor(p[i].x * pgrid.w), 0.0f);
         int gy = max(floor(p[i].y * pgrid.h), 0.0f);
         
-        const Grid::cell_t& cell = pgrid.getcell(gx, gy);
+        //const Grid::cell_t& cell = pgrid.getcell(gx, gy);
         for(int nidx=0;nidx<9;nidx++) {
             int nx = gx + neighbors[nidx][0];
             int ny = gy + neighbors[nidx][1];
             if( nx >= 0 && nx < pgrid.w && ny >= 0 && ny < pgrid.h ) {
                 const Grid::cell_t& ncell = pgrid.getcell(nx, ny);
-
+                
                 for (int j : ncell) {
                     if( i >= j ) continue;
                     Vec dp = p[i] - p[j];
-                    float r2 = glm::dot(dp, dp);
-                    if (r2 < h2) {
-                        const float rhoj = rho[j];
-                        float q = sqrt(r2)/h;
-                        float u = 1-q;
-                        float w0 = C0 * u/rhoi/rhoj;
-                        float wp = w0 * Cp * (rhoi+rhoj-2*rho0) * u/q;
-                        float wv = w0 * Cv;
-                        Vec dv = v[i] - v[j];
-                        a[i].x += (wp*dp.x + wv*dv.x);
-                        a[i].y += (wp*dp.y + wv*dv.y);
-                        a[j].x -= (wp*dp.x + wv*dv.x);
-                        a[j].y -= (wp*dp.y + wv*dv.y);
-                    }
+                    float r = glm::length(dp);
+                    const float rhoj = rho[j];
+                    
+                    Vec fp = mass / rhoi / rhoj * 0.5f * (pressure[i] + pressure[j]) * spiky_grad(h, r) * dp;
+                    
+                    Vec dv = v[j] - v[i];
+                    
+                    Vec fv = mu * mass / rhoi / rhoj  * dv * viscosity_lap(h, r);
+                    
+                    Vec ftotal = fp + fv;
+                    a[i] += ftotal;
+                    a[j] -= ftotal;
                 }
             }
         }
     }
-#else
-    // Now compute interaction forces
-    for (int i = 0; i < n; ++i) {
-        const float rhoi = rho[i];
-        for (int j = i+1; j < n; ++j) {
-            Vec dp = p[i] - p[j];
-            float r2 = glm::dot(dp, dp);
-            if (r2 < h2) {
-                const float rhoj = rho[j];
-                float q = sqrt(r2)/h;
-                float u = 1-q;
-                float w0 = C0 * u/rhoi/rhoj;
-                float wp = w0 * Cp * (rhoi+rhoj-2*rho0) * u/q;
-                float wv = w0 * Cv;
-                Vec dv = v[i] - v[j];
-                a[i].x += (wp*dp.x + wv*dv.x);
-                a[i].y += (wp*dp.y + wv*dv.y);
-                a[j].x -= (wp*dp.x + wv*dv.x);
-                a[j].y -= (wp*dp.y + wv*dv.y);
-            }
-        }
-    }
-#endif
 }
 
 void SPHSystem::dampReflect(int side, float barrier, Vec& pos, Vec& velo, Vec& veloh) {
