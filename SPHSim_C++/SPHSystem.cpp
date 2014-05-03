@@ -128,9 +128,7 @@ void SPHSystem::sortParticles() {
 }
 
 void SPHSystem::computeDensity() {
-#if USE_BUCKETS
     sortParticles();
-#endif
     
     vector<float>& rho = density;
     
@@ -226,11 +224,11 @@ void SPHSystem::computeAcceleration() {
                     float r = glm::length(dp);
                     const float rhoj = rho[j];
                     
-                    Vec fp = mass / rhoi / rhoj * 0.5f * (pressure[i] + pressure[j]) * spiky_grad(h, r) * dp;
+                    Vec fp = mass / rhoj / rhoi * 0.5f * (pressure[i] + pressure[j]) * spiky_grad(h, r) * dp;
                     
                     Vec dv = v[j] - v[i];
                     
-                    Vec fv = mu * mass / rhoi / rhoj  * dv * viscosity_lap(h, r);
+                    Vec fv = mu * mass / rhoj / rhoi * dv * viscosity_lap(h, r);
                     
                     Vec ftotal = fp + fv;
                     a[i] += ftotal;
@@ -251,8 +249,8 @@ void SPHSystem::dampReflect(int side, float barrier, Vec& pos, Vec& velo, Vec& v
     
     // Scale back the distance traveled based on time from collision
     float tbounce = (pos[side]-barrier)/velo[side];
-    pos[0] -= velo[0]*(1-DAMP)*tbounce;
-    pos[1] -= velo[1]*(1-DAMP)*tbounce;
+    
+    pos -= velo * (1-DAMP) * tbounce;
     
     // Reflect the position and velocity
     pos[side]  = 2*barrier-pos[side];
@@ -260,8 +258,7 @@ void SPHSystem::dampReflect(int side, float barrier, Vec& pos, Vec& velo, Vec& v
     veloh[side] = -veloh[side];
     
     // Damp the velocities
-    velo[0] *= DAMP;  veloh[0] *= DAMP;
-    velo[1] *= DAMP;  veloh[1] *= DAMP;
+    velo *= DAMP;   veloh *= DAMP;
 }
 
 void SPHSystem::reflectOnBoundary() {
