@@ -28,6 +28,7 @@ public:
             loadParamsFromFile(filename);
         }
         void setDefaultParams() {
+            writeLog = true;
             logfile = "result.bin";
             nframes = 400;
             nsteps = 100;
@@ -47,7 +48,9 @@ public:
                 return;
             }
             
-            fin >> logfile
+            string dooutput;
+            fin >> dooutput
+                >> logfile
                 >> nframes
                 >> nsteps
                 >> dt
@@ -56,8 +59,12 @@ public:
                 >> k
                 >> mu
                 >> g;
+            
+            if( dooutput == "true" ) writeLog = true;
+            else writeLog = false;
         }
         
+        bool writeLog;
         string logfile;
         int nframes;        // total number of frames
         int nsteps;         // number of steps per frame
@@ -96,7 +103,13 @@ public:
     SPHSystem();
     SPHSystem(const string& filename);
     
+    void init();
+    void step();
     void run();
+    
+    const vector<Vec>& particles() const {
+        return p;
+    }
     
 protected:
     void resize(int n);
@@ -116,8 +129,8 @@ protected:
     
     void checkState();
     
-    void writeHeader(ofstream&);
-    void writeFrame(ofstream&, float*);
+    void writeHeader();
+    void writeFrame(float*);
     
 private:
     Parameters params;
@@ -131,6 +144,9 @@ private:
     unsigned int n;
     
     Grid pgrid;
+    
+    int curframe;
+    ofstream logstream;
 };
 
 #endif /* defined(__SPHSim_C____SPHSystem__) */

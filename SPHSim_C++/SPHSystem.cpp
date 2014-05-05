@@ -18,28 +18,60 @@ SPHSystem::SPHSystem(const string& filename) {
     initParticles();
 }
 
-void SPHSystem::writeHeader(ofstream& f) {
+void SPHSystem::writeHeader() {
     float scale = 1.0;
     
-    f.write(reinterpret_cast<const char*>(&n), sizeof(int));
-    f.write(reinterpret_cast<const char*>(&params.nframes), sizeof(int));
-    f.write(reinterpret_cast<const char*>(&scale), sizeof(float));
+    logstream.write(reinterpret_cast<const char*>(&n), sizeof(int));
+    logstream.write(reinterpret_cast<const char*>(&params.nframes), sizeof(int));
+    logstream.write(reinterpret_cast<const char*>(&scale), sizeof(float));
 }
 
-void SPHSystem::writeFrame(ofstream& f, float* c = 0) {
+void SPHSystem::writeFrame(float* c = 0) {
     for (int i = 0; i < n; ++i) {
         Vec x = p[i];
         float ci = c ? c[i] : 0;
         //cout << p[i].x << ' ' << p[i].y << ' '<< p[i].z << ' ' << ci << endl;
         
-        f.write(reinterpret_cast<const char*>(&x.x), sizeof(float));
-        f.write(reinterpret_cast<const char*>(&x.y), sizeof(float));
-        f.write(reinterpret_cast<const char*>(&x.z), sizeof(float));
-        f.write(reinterpret_cast<const char*>(&ci), sizeof(float));
+        logstream.write(reinterpret_cast<const char*>(&x.x), sizeof(float));
+        logstream.write(reinterpret_cast<const char*>(&x.y), sizeof(float));
+        logstream.write(reinterpret_cast<const char*>(&x.z), sizeof(float));
+        logstream.write(reinterpret_cast<const char*>(&ci), sizeof(float));
+    }
+}
+
+void SPHSystem::init() {
+    if( params.writeLog ) {
+        logstream = ofstream(params.logfile, ios::binary);
+        // write initial state
+        writeHeader();
+        writeFrame(&pressure[0]);
+    }
+    
+    // step once
+    computeAcceleration();
+    leapFrogStart();
+    checkState();
+    
+    curframe = 0;
+}
+
+void SPHSystem::step() {
+    curframe++;
+    cout << "frame " << curframe << " out of " << params.nframes << endl;
+    if (curframe < params.nframes) {
+        for (int i = 0; i < params.nsteps; ++i) {
+            computeAcceleration();
+            leapFrog();
+            checkState();
+        }
+        
+        if( params.writeLog )
+            writeFrame(&pressure[0]);
     }
 }
 
 void SPHSystem::run() {
+#if 0
     ofstream f(params.logfile, ios::binary);
     
     writeHeader(f);
@@ -50,6 +82,7 @@ void SPHSystem::run() {
     checkState();
     
     for (int frame = 1; frame < params.nframes; ++frame) {
+        cout << "frame " << frame << " out of " << params.nframes << endl;
         for (int i = 0; i < params.nsteps; ++i) {
             computeAcceleration();
             leapFrog();
@@ -57,6 +90,12 @@ void SPHSystem::run() {
         }
         writeFrame(f, &pressure[0]);
     }
+#else
+    init();
+    for (int frame = 1; frame < params.nframes; ++frame) {
+        step();
+    }
+#endif
 }
 
 void SPHSystem::resize(int count) {
@@ -73,7 +112,7 @@ void SPHSystem::initParticles() {
     float h  = params.h;
     float hh = h/1.3;
     
-    auto indicatef = [](float x, float y, float z){ return x>0.5 && y<0.5 && z>0.5;};
+    auto indicatef = [](float x, float y, float z){ return x>0.25 && x < 0.75 && y>0.5 && z>0.25 && z < 0.75;};
     
     // Count mesh points that fall in indicated region.
     int count = 0;
@@ -143,7 +182,6 @@ void SPHSystem::computeDensity() {
     vector<float>& rho = density;
     
     float h  = params.h;
-    float h3 = h*h*h;
     
     memset(&(rho[0]), 0, sizeof(float)*rho.size());
     
