@@ -85,9 +85,12 @@ void drawParticles(SPHSystem* sph) {
     auto p = sph->particles();
     glPointSize(2.0f);
     glColor3f(1, 1, 1);
+    float r, g, b;
     glBegin(GL_POINTS);
     for(auto x : p) {
         auto pos = x*2.0f-1.0f;
+        r = x.y/0.25, b = 1.0 - r, g = 0.0;
+        glColor3f(r, g, b);
         glVertex3f(pos.x, pos.y, pos.z);
     }
     glEnd();
@@ -120,6 +123,7 @@ int main(int argc, const char * argv[])
     {
         sph->step();
         
+        // setup viewing params
         float ratio;
         int width, height;
         glfwGetFramebufferSize(window, &width, &height);
@@ -128,7 +132,7 @@ int main(int argc, const char * argv[])
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         
         glm::mat4 mproj = glm::perspective(45.0f, ratio, 0.0001f, 10.0f);
-        glm::mat4 mview = glm::lookAt(glm::vec3(0, 1.5, -3.5), glm::vec3(0), glm::vec3(0, 1, 0));
+        glm::mat4 mview = glm::lookAt(glm::vec3(0, 0.0, -3.5), glm::vec3(0), glm::vec3(0, 1, 0));
         glm::mat4 mmodel = glm::mat4(1.0f);
         glm::mat4 mmv = mview * mmodel;
         
@@ -144,6 +148,7 @@ int main(int argc, const char * argv[])
         glEnable( GL_DEPTH_TEST );
         glDepthFunc(GL_LESS);
 
+        // render the scene
         drawParticles(sph);
         drawCube();
         

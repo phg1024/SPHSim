@@ -7,14 +7,17 @@
 //
 
 #include "SPHSystem.h"
-#include "kernels.h"
+#include "marchingcubes/CIsoSurface.h"
 
 SPHSystem::SPHSystem() {
+    kern = Kernel(params.h);
     initParticles();
 }
 
 SPHSystem::SPHSystem(const string& filename) {
     params = Parameters(filename);
+    kern = Kernel(params.h);
+    
     initParticles();
 }
 
@@ -37,9 +40,29 @@ void SPHSystem::writeFrame(float* c = 0) {
         logstream.write(reinterpret_cast<const char*>(&x.z), sizeof(float));
         logstream.write(reinterpret_cast<const char*>(&ci), sizeof(float));
     }
+    
+    vector<float> voxels = voxelize(64, 64, 64);
+    // write the voxels to a file
+    stringstream ss;
+    ss << "frame" << curframe << ".bin";
+    cout << "writing file " << ss.str() << " with " << voxels.size() << " voxels." << endl;
+    ofstream fout(ss.str(), ios::binary);
+    fout.write(reinterpret_cast<const char*>(&voxels[0]), sizeof(float)*voxels.size());
+    fout.close();
+    
+    CIsoSurface<float> mc;
+    cout << "extracing mesh with marching cubes ..." << endl;
+    mc.GenerateSurface(&voxels[0], 1.0f, 63, 63, 63, 1.0, 1.0, 1.0);
+    cout << "done." << endl;
+    stringstream ss2;
+    ss2 << "frame" << curframe << ".obj";
+    cout << "writing file " << ss2.str() << endl;
+    mc.writeToFile(ss2.str());
 }
 
 void SPHSystem::init() {
+    curframe = 0;
+
     if( params.writeLog ) {
         logstream = ofstream(params.logfile, ios::binary);
         // write initial state
@@ -51,8 +74,6 @@ void SPHSystem::init() {
     computeAcceleration();
     leapFrogStart();
     checkState();
-    
-    curframe = 0;
 }
 
 void SPHSystem::step() {
@@ -71,31 +92,10 @@ void SPHSystem::step() {
 }
 
 void SPHSystem::run() {
-#if 0
-    ofstream f(params.logfile, ios::binary);
-    
-    writeHeader(f);
-    writeFrame(f, &pressure[0]);
-    
-    computeAcceleration();
-    leapFrogStart();
-    checkState();
-    
-    for (int frame = 1; frame < params.nframes; ++frame) {
-        cout << "frame " << frame << " out of " << params.nframes << endl;
-        for (int i = 0; i < params.nsteps; ++i) {
-            computeAcceleration();
-            leapFrog();
-            checkState();
-        }
-        writeFrame(f, &pressure[0]);
-    }
-#else
     init();
     for (int frame = 1; frame < params.nframes; ++frame) {
         step();
     }
-#endif
 }
 
 void SPHSystem::resize(int count) {
@@ -104,7 +104,10 @@ void SPHSystem::resize(int count) {
     v.resize(n);
     vh.resize(n);
     a.resize(n);
+    cid.resize(n);
+    nid.resize(n);
     density.resize(n);
+    invrho.resize(n);
     pressure.resize(n);
 }
 
@@ -112,7 +115,7 @@ void SPHSystem::initParticles() {
     float h  = params.h;
     float hh = h/1.3;
     
-    auto indicatef = [](float x, float y, float z){ return x>0.25 && x < 0.75 && y>0.5 && z>0.25 && z < 0.75;};
+    auto indicatef = [](float x, float y, float z){ return x>0.875 && y<0.75;};
     
     // Count mesh points that fall in indicated region.
     int count = 0;
@@ -160,12 +163,26 @@ void SPHSystem::normalizeMass() {
         rhos  += density[i];
     }
     
-    // mass = rho0 * sum( rho[i] ) / sum( rho[i] * rho[i] )
     mass *= ( rho0*rhos / rho2s );
 }
 
 void SPHSystem::sortParticles() {
     pgrid.reset();
+    
+    const int neighbors[][3] = {
+        {-1, -1, -1}, {-1, 0, -1}, {-1, 1, -1},
+        { 0, -1, -1}, { 0, 0, -1}, { 0, 1, -1},
+        { 1, -1, -1}, { 1, 0, -1}, { 1, 1, -1},
+        
+        {-1, -1, 0}, {-1, 0, 0}, {-1, 1, 0},
+        { 0, -1, 0}, { 0, 0, 0}, { 0, 1, 0},
+        { 1, -1, 0}, { 1, 0, 0}, { 1, 1, 0},
+        
+        {-1, -1, 1}, {-1, 0, 1}, {-1, 1, 1},
+        { 0, -1, 1}, { 0, 0, 1}, { 0, 1, 1},
+        { 1, -1, 1}, { 1, 0, 1}, { 1, 1, 1},
+    };
+    
     
     for( int i=0;i<p.size();i++ ) {
         int gx = min(max((int)floor(p[i].x * pgrid.w), 0), pgrid.w-1);
@@ -173,7 +190,84 @@ void SPHSystem::sortParticles() {
         int gz = min(max((int)floor(p[i].z * pgrid.d), 0), pgrid.d-1);
         Grid::cell_t& cell = pgrid.getcell(gx, gy, gz);
         cell.push_back(i);
+        cid[i] = iVec(gx, gy, gz);
+        
+        // determine relevant neighbors
+        nid[i].clear();
+        nid[i].reserve(27);
+        
+        for(int nidx=0;nidx<27;nidx++) {
+            int nx = gx + neighbors[nidx][0];
+            int ny = gy + neighbors[nidx][1];
+            int nz = gz + neighbors[nidx][2];
+            
+            if( nx >= 0 && nx < pgrid.w
+               && ny >= 0 && ny < pgrid.h
+               && nz >= 0 && nz < pgrid.d ) {
+                nid[i].push_back(nz * pgrid.w * pgrid.h + ny * pgrid.w + nx);
+            }
+        }
     }
+}
+
+vector<float> SPHSystem::voxelize(int resX, int resY, int resZ) const {
+    const int neighbors[][3] = {
+        {-1, -1, -1}, {-1, 0, -1}, {-1, 1, -1},
+        { 0, -1, -1}, { 0, 0, -1}, { 0, 1, -1},
+        { 1, -1, -1}, { 1, 0, -1}, { 1, 1, -1},
+        
+        {-1, -1, 0}, {-1, 0, 0}, {-1, 1, 0},
+        { 0, -1, 0}, { 0, 0, 0}, { 0, 1, 0},
+        { 1, -1, 0}, { 1, 0, 0}, { 1, 1, 0},
+        
+        {-1, -1, 1}, {-1, 0, 1}, {-1, 1, 1},
+        { 0, -1, 1}, { 0, 0, 1}, { 0, 1, 1},
+        { 1, -1, 1}, { 1, 0, 1}, { 1, 1, 1},
+    };
+    
+    vector<float> voxels;
+    voxels.reserve(resX*resY*resZ);
+    
+    float xStep = 1.0 / resX;
+    float yStep = 1.0 / resY;
+    float zStep = 1.0 / resZ;
+    
+    for (float zCoord = 0.5 * zStep; zCoord < 1.0; zCoord += zStep) {
+        for (float yCoord = 0.5 * yStep; yCoord < 1.0; yCoord += yStep) {
+            for (float xCoord = 0.5 * zStep; xCoord < 1.0; xCoord += xStep) {
+                // evaluate the density at current point
+                int gx = min(max((int)floor(xCoord * pgrid.w), 0), pgrid.w-1);
+                int gy = min(max((int)floor(yCoord * pgrid.h), 0), pgrid.h-1);
+                int gz = min(max((int)floor(zCoord * pgrid.d), 0), pgrid.d-1);
+                
+                Vec gp = Vec(xCoord, yCoord, zCoord);
+                float rho = 0;
+                
+                for(int nidx=0;nidx<27;nidx++) {
+                    int nx = gx + neighbors[nidx][0];
+                    int ny = gy + neighbors[nidx][1];
+                    int nz = gz + neighbors[nidx][2];
+                    
+                    if( nx >= 0 && nx < pgrid.w
+                       && ny >= 0 && ny < pgrid.h
+                       && nz >= 0 && nz < pgrid.d ) {
+                        const Grid::cell_t& ncell = pgrid.getcell(nx, ny, nz);
+                        
+                        for (int j : ncell) {
+                            Vec dp = gp - p[j];
+                            
+                            float r = glm::length(dp);
+                            float rho_j = mass * kern.poly6(r);
+                            rho += rho_j;
+                        }
+                    }
+                }
+                voxels.push_back(rho);
+            }
+        }
+    }
+    
+    return voxels;
 }
 
 void SPHSystem::computeDensity() {
@@ -181,77 +275,43 @@ void SPHSystem::computeDensity() {
     
     vector<float>& rho = density;
     
-    float h  = params.h;
-    
     memset(&(rho[0]), 0, sizeof(float)*rho.size());
     
-    const int neighbors[][3] = {
-        {-1, -1, -1}, {-1, 0, -1}, {-1, 1, -1},
-        { 0, -1, -1}, { 0, 0, -1}, { 0, 1, -1},
-        { 1, -1, -1}, { 1, 0, -1}, { 1, 1, -1},
-
-        {-1, -1, 0}, {-1, 0, 0}, {-1, 1, 0},
-        { 0, -1, 0}, { 0, 0, 0}, { 0, 1, 0},
-        { 1, -1, 0}, { 1, 0, 0}, { 1, 1, 0},
-
-        {-1, -1, 1}, {-1, 0, 1}, {-1, 1, 1},
-        { 0, -1, 1}, { 0, 0, 1}, { 0, 1, 1},
-        { 1, -1, 1}, { 1, 0, 1}, { 1, 1, 1},
-    };
-    
     for (int i = 0; i < n; ++i) {
-        rho[i] += mass * poly6(h, 0);
+        rho[i] += mass * kern.poly6(0);
         
-        int gx = max(floor(p[i].x * pgrid.w), 0.0f);
-        int gy = max(floor(p[i].y * pgrid.h), 0.0f);
-        int gz = max(floor(p[i].z * pgrid.d), 0.0f);
-        
-        //const Grid::cell_t& cell = pgrid.getcell(gx, gy);
-        for(int nidx=0;nidx<27;nidx++) {
-            int nx = gx + neighbors[nidx][0];
-            int ny = gy + neighbors[nidx][1];
-            int nz = gz + neighbors[nidx][2];
+        for(int nidx=0;nidx<nid[i].size();nidx++) {
+            const Grid::cell_t& ncell = pgrid.getcell(nid[i][nidx]);
             
-            if( nx >= 0 && nx < pgrid.w
-             && ny >= 0 && ny < pgrid.h
-             && nz >= 0 && nz < pgrid.d ) {
-                const Grid::cell_t& ncell = pgrid.getcell(nx, ny, nz);
-                
-                for (int j : ncell) {
-                    if (i >= j) {
-                        continue;
-                    }
-                    Vec dp = p[i] - p[j];
-                    
-                    float r = glm::length(dp);
-                    float rho_ij = mass * poly6(h, r);
-                    rho[i] += rho_ij;
-                    rho[j] += rho_ij;
+            for (int j : ncell) {
+                if (i >= j) {
+                    continue;
                 }
+                Vec dp = p[i] - p[j];
+                
+                float r = glm::length(dp);
+                float rho_ij = mass * kern.poly6(r);
+                rho[i] += rho_ij;
+                rho[j] += rho_ij;
             }
         }
     }
     
     // update pressure
-    const float B = params.k;
-    const float gamma = 7.0;
-    const float invRHO0 = 1.0 / params.rho0;
+//    const float B = params.k;
+//    const float gamma = 7.0;
+//    const float invRHO0 = 1.0 / params.rho0;
     for (int i=0; i<n; ++i) {
-        //pressure[i] = params.k * (rho[i] - params.rho0);
-        pressure[i] = B * (powf(rho[i] * invRHO0, gamma) - 1);
+        pressure[i] = params.k * (rho[i] - params.rho0);
+//        pressure[i] = B * (powf(rho[i] * invRHO0, gamma) - 1);
+        invrho[i] = 1.0 / rho[i];
     }
 }
 
 void SPHSystem::computeAcceleration() {
     // Unpack basic parameters
-    const float h    = params.h;
-    //const float rho0 = params.rho0;
-    //const float k    = params.k;
     const float mu   = params.mu;
     const float g    = params.g;
-    
-    // Unpack system state
-    const vector<float>& rho = density;
     
     // Compute density and color
     computeDensity();
@@ -261,54 +321,29 @@ void SPHSystem::computeAcceleration() {
         a[i] = Vec(0, -g, 0);
     }
     
-    const int neighbors[][3] = {
-        {-1, -1, -1}, {-1, 0, -1}, {-1, 1, -1},
-        { 0, -1, -1}, { 0, 0, -1}, { 0, 1, -1},
-        { 1, -1, -1}, { 1, 0, -1}, { 1, 1, -1},
-        
-        {-1, -1, 0}, {-1, 0, 0}, {-1, 1, 0},
-        { 0, -1, 0}, { 0, 0, 0}, { 0, 1, 0},
-        { 1, -1, 0}, { 1, 0, 0}, { 1, 1, 0},
-        
-        {-1, -1, 1}, {-1, 0, 1}, {-1, 1, 1},
-        { 0, -1, 1}, { 0, 0, 1}, { 0, 1, 1},
-        { 1, -1, 1}, { 1, 0, 1}, { 1, 1, 1},
-    };
-    
     // Now compute interaction forces
     for (int i = 0; i < n; ++i) {
-        const float rhoi = rho[i];
-        int gx = max(floor(p[i].x * pgrid.w), 0.0f);
-        int gy = max(floor(p[i].y * pgrid.h), 0.0f);
-        int gz = max(floor(p[i].z * pgrid.d), 0.0f);
+        float w0i = mass * invrho[i];
         
-        //const Grid::cell_t& cell = pgrid.getcell(gx, gy);
-        for(int nidx=0;nidx<27;nidx++) {
-            int nx = gx + neighbors[nidx][0];
-            int ny = gy + neighbors[nidx][1];
-            int nz = gz + neighbors[nidx][2];
+        for(int nidx=0;nidx<nid[i].size();nidx++) {
+            const Grid::cell_t& ncell = pgrid.getcell(nid[i][nidx]);
             
-            if( nx >= 0 && nx < pgrid.w
-             && ny >= 0 && ny < pgrid.h
-             && nz >= 0 && nz < pgrid.d ) {
-                const Grid::cell_t& ncell = pgrid.getcell(nx, ny, nz);
+            for (int j : ncell) {
+                if( i >= j ) continue;
+                Vec dp = p[i] - p[j];
+                float r = glm::length(dp);
                 
-                for (int j : ncell) {
-                    if( i >= j ) continue;
-                    Vec dp = p[i] - p[j];
-                    float r = glm::length(dp);
-                    const float rhoj = rho[j];
-                    
-                    Vec fp = mass / rhoj / rhoi * 0.5f * (pressure[i] + pressure[j]) * spiky_grad(h, r) * dp;
-                    
-                    Vec dv = v[j] - v[i];
-
-                    Vec fv = mu * mass / rhoj / rhoi * dv * viscosity_lap(h, r);
-                    
-                    Vec ftotal = fp + fv;
-                    a[i] += ftotal;
-                    a[j] -= ftotal;
-                }
+                //Vec fp = mass / rhoj / rhoi * 0.5f * (pressure[i] + pressure[j]) * spiky_grad(h, r) * dp;
+                float w0ij = w0i * invrho[j];
+                Vec fp = w0ij * 0.5f * (pressure[i] + pressure[j]) * kern.spiky_grad(r) * dp;
+                
+                Vec dv = v[j] - v[i];
+                
+                Vec fv = mu * w0ij * dv * kern.viscosity_lap(r);
+                
+                Vec ftotal = fp + fv;
+                a[i] += ftotal;
+                a[j] -= ftotal;
             }
         }
     }

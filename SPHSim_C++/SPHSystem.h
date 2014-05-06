@@ -11,12 +11,14 @@
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <vector>
 using namespace std;
 
 #include <cstdio>
 
 #include "glm.hpp"
+#include "kernels.h"
 
 class SPHSystem {
 public:
@@ -87,7 +89,20 @@ public:
             cells.clear();
             init();
         }
+        cell_t& getcell(int idx) {
+            if(idx >=0 && idx < w*h*d) return cells[idx];
+            else throw "Try to access ghost cell.";
+        }
+        const cell_t& getcell(int idx) const {
+            if(idx >=0 && idx < w*h*d) return cells[idx];
+            else throw "Try to access ghost cell.";
+        }
         cell_t& getcell(int x, int y, int z) {
+            int idx = w*h*z + y*w + x;
+            if(idx >=0 && idx < w*h*d) return cells[idx];
+            else throw "Try to access ghost cell.";
+        }
+        const cell_t& getcell(int x, int y, int z) const {
             int idx = w*h*z + y*w + x;
             if(idx >=0 && idx < w*h*d) return cells[idx];
             else throw "Try to access ghost cell.";
@@ -99,6 +114,7 @@ public:
     
 public:
     typedef glm::vec3 Vec;
+    typedef glm::ivec3 iVec;
     
     SPHSystem();
     SPHSystem(const string& filename);
@@ -110,6 +126,8 @@ public:
     const vector<Vec>& particles() const {
         return p;
     }
+    
+    vector<float> voxelize(int resX, int resY, int resZ) const;
     
 protected:
     void resize(int n);
@@ -135,9 +153,13 @@ protected:
 private:
     Parameters params;
     
-    vector<Vec> p, v, vh, a;
+    Kernel kern;
     
+    vector<Vec> p, v, vh, a;
+    vector<iVec> cid;               // cell index of each particle
+    vector<vector<int>> nid;       // relevant neighbor cell indices
     vector<float> density;
+    vector<float> invrho;
     vector<float> pressure;
     
     float mass;
